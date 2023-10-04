@@ -6,6 +6,9 @@ from openpyxl import Workbook, load_workbook
 from traceback import format_exc as traceback_format_exc
 
 
+# If true, a TXT file with the extracted text will be created for each PDF file
+DUMP_TEXT: bool = True
+
 # Define the threshold for saving data to XLSX
 SAVE_THRESHOLD = 25
 
@@ -38,6 +41,13 @@ async def process_pdf(pdf_file, found_cups, pending_cups_data, threshold):
 
             for page in pdf.pages:
                 text += page.extract_text()
+
+        # Dump the extracted text to a TXT file (replacing the file extension)
+        if DUMP_TEXT:
+            txt_file_name = pdf_file.replace(".pdf", ".txt")
+            txt_file_path = os.path.join(os.getcwd(), txt_file_name)
+            with open(txt_file_path, "w") as txt_file:
+                txt_file.write(text)
 
         # Initialize a dictionary to store extracted data
         extracted_data = dict()
