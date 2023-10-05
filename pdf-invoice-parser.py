@@ -2,12 +2,14 @@ import asyncio
 import os
 import pdfplumber
 import re
+from datetime import datetime
 from openpyxl import Workbook, load_workbook
 from traceback import format_exc as traceback_format_exc
 
 
 # If true, a TXT file with the extracted text will be created for each PDF file
-DUMP_TEXT: bool = True
+DUMP_TEXT: bool = False
+SINGLE_DUMP: bool = True
 
 # Define the threshold for saving data to XLSX
 SAVE_THRESHOLD = 25
@@ -26,10 +28,33 @@ COLUMN_HEADERS = [
 ]
 
 
+# * Decorator to add datetime to print
+def print_decorator(func):
+    def wrapper(*args, **kwargs):
+        try:
+            return func(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), *args, **kwargs)
+        except KeyboardInterrupt:
+            pass
+        except Exception as e:
+            print(f"Exception: {e}")
+
+    return wrapper
+
+
+# Custom print function with the decorator applied, dp means decorated print
+@print_decorator
+def dp(*args, **kwargs):
+    print(*args, **kwargs)
+
+
+# TODO: Add a benchmark decorator to measure execution time.
+
+
 async def process_pdf(pdf_file, found_cups, pending_cups_data, threshold):
-    """
-    Given a PDF file path, extract the data and save it to an XLSX file.
-    """
+    """Given a PDF file path, extract the data and save it to an XLSX file."""
+
+    global SINGLE_DUMP  # * Using global to avoid UnboundLocalError
+
     pdf_file_path = os.path.join(os.getcwd(), pdf_file)
 
     try:
@@ -37,13 +62,14 @@ async def process_pdf(pdf_file, found_cups, pending_cups_data, threshold):
         # Open the PDF file with pdfplumber
         with pdfplumber.open(pdf_file_path) as pdf:
             num_pages = len(pdf.pages)
-            print(f"Processing {pdf_file} ({num_pages} pages)...")
+            dp(f"Processing {pdf_file} ({num_pages} pages)...")
 
             for page in pdf.pages:
                 text += page.extract_text()
 
         # Dump the extracted text to a TXT file (replacing the file extension)
-        if DUMP_TEXT:
+        if DUMP_TEXT or SINGLE_DUMP:
+            SINGLE_DUMP = False
             txt_file_name = pdf_file.replace(".pdf", ".txt")
             txt_file_path = os.path.join(os.getcwd(), txt_file_name)
             with open(txt_file_path, "w") as txt_file:
@@ -102,27 +128,34 @@ async def process_pdf(pdf_file, found_cups, pending_cups_data, threshold):
 
         # Check if CUPS has been processed
         actual_cups: str = extracted_data["CUPS"]
+        actual_invoice: str = extracted_data["Nº Factura"]
+
         if actual_cups not in found_cups:
+            found_cups[actual_cups] = set()
             pending_cups_data[actual_cups] = []
             # Create a new XLSX file for this CUPS
             create_xlsx(actual_cups, found_cups)
 
-        # Add the extracted data to the list of pending data for this CUPS
+        elif actual_invoice in found_cups[actual_cups]:
+            dp(f"Skipping {pdf_file} because it has already been processed.")
+            return
+
+        # Register the invoice and link the extracted data to its CUPS code
+        found_cups[actual_cups].add(actual_invoice)
         pending_cups_data[actual_cups].append(extracted_data)
 
         # Check if the threshold is reached
         if threshold and len(pending_cups_data[actual_cups]) >= threshold:
             # Save data to the XLSX file
-            save_to_xlsx(actual_cups, found_cups, pending_cups_data)
+            save_to_xlsx(actual_cups, pending_cups_data)
 
     except Exception as e:
-        print(f"Error processing {pdf_file}: {str(e)}")
+        dp(f"Error processing {pdf_file}: {str(e)}")
         print(traceback_format_exc())
 
 
 def create_xlsx(cups, found_cups):
     xlsx_file_path = os.path.join(os.getcwd(), f"{cups}.xlsx")
-    found_cups.add(cups)
 
     # Create a new workbook and worksheet
     workbook = Workbook()
@@ -135,22 +168,17 @@ def create_xlsx(cups, found_cups):
     return worksheet
 
 
-def save_to_xlsx(cups, found_cups, pending_cups_data):
+def save_to_xlsx(cups, pending_cups_data):
     xlsx_name = f"{cups}.xlsx"
     xlsx_file_path = os.path.join(os.getcwd(), xlsx_name)
 
-    # If cups in set, a linked XLSX file should exist
-    if cups not in found_cups:
-        # Create a new XLSX file if it doesn't exist
-        worksheet = create_xlsx(cups, found_cups)
-    else:
-        # Load the existing workbook
-        workbook = load_workbook(xlsx_file_path)
-        worksheet = workbook.active
+    # Load the workbook linked to this CUPS
+    workbook = load_workbook(xlsx_file_path)
+    worksheet = workbook.active
 
     # Append rows from pending_cups_data
     for row in pending_cups_data[cups]:
-        # print(f"Row to append for {cups}: {row}")
+        # dp(f"Row to append for {cups}: {row}")
         data_row = [row.get(key, "") for key in COLUMN_HEADERS]
         worksheet.append(data_row)
 
@@ -160,10 +188,17 @@ def save_to_xlsx(cups, found_cups, pending_cups_data):
 
 async def main():
     # Set variable to track processed CUPS codes values
-    found_cups = set()
+    """
+    A single CUPS code can have multiple invoices (invoice numbers). To avoid
+    processing the same invoice number more than once, we need to keep track of
+    the processed invoice numbers for each CUPS code. This can be done by
+    refactoring the found_cups set to a dictionary, where the key is the CUPS
+    code and the value is a set of processed invoice numbers.
+    """
+    found_cups: dict[str, set[str]] = dict()
 
     # Dictionary to store data pending to be saved to XLSX files, by CUPS code
-    pending_cups_data = {}
+    pending_cups_data: dict[str, list[dict]] = dict()
 
     # List all PDF files in the current directory
     pdf_files = [file for file in os.listdir(os.getcwd()) if file.endswith(".pdf")]
@@ -173,7 +208,7 @@ async def main():
 
     # Save any remaining pending data to XLSX files
     for cups in list(found_cups):
-        save_to_xlsx(cups, found_cups, pending_cups_data)
+        save_to_xlsx(cups, pending_cups_data)
 
 
 if __name__ == "__main__":
